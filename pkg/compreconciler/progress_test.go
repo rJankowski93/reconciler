@@ -19,7 +19,7 @@ func TestProgressTracker(t *testing.T) {
 	require.NoError(t, err)
 
 	//ensure old resources are deleted before running the test
-	err = kubeClient.Delete(manifest)
+	_, err = kubeClient.Delete(manifest)
 	if err != nil {
 		t.Log("Cleanup of old test resources failed (probably nothing to cleanup): test is continuing")
 	}
@@ -30,7 +30,8 @@ func TestProgressTracker(t *testing.T) {
 	require.NoError(t, err)
 	defer func() {
 		t.Log("Cleanup test resources")
-		require.NoError(t, kubeClient.Delete(manifest))
+		_, err := kubeClient.Delete(manifest)
+		require.NoError(t, err)
 	}()
 
 	// get progress tracker

@@ -4,42 +4,21 @@ import (
 	"bufio"
 	"bytes"
 	b64 "encoding/base64"
-	"fmt"
-	"github.com/google/uuid"
 	"github.com/kyma-incubator/reconciler/pkg/compreconciler/kubeclient"
 	"github.com/kyma-incubator/reconciler/pkg/compreconciler/types"
 	"github.com/pkg/errors"
 	"io"
-	"io/ioutil"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes"
-	"os"
-	"os/exec"
 	yamlToJson "sigs.k8s.io/yaml"
-	"strings"
 )
 
 type goClient struct {
 	kubeClient kubeclient.KubeClient
-
-	kubectlCmd     string
-	kubeconfigFile string
-	manifestFile   string
 }
 
-const (
-	envVarKubectlPath = "KUBECTL_PATH"
-)
-
 func newGoClient(kubeconfig string) (kubernetesClient, error) {
-	kubectlCmd, err := kubectl()
-	if err != nil {
-		return nil, err
-	}
-	kubeconfigFile := "/tmp/kubeconfig-" + uuid.New().String()
-	if err := ioutil.WriteFile(kubeconfigFile, []byte(kubeconfig), 0600); err != nil {
-		return nil, err
-	}
 
 	base64kubeConfig := b64.StdEncoding.EncodeToString([]byte(kubeconfig))
 	client, err := kubeclient.NewKubeClient(base64kubeConfig)
@@ -49,14 +28,11 @@ func newGoClient(kubeconfig string) (kubernetesClient, error) {
 
 	return &goClient{
 		kubeClient: *client,
-
-		kubectlCmd:     kubectlCmd,
-		kubeconfigFile: kubeconfigFile,
 	}, nil
 }
 
 func (g goClient) Deploy(manifest string) (results []string, resources []types.Metadata, err error) {
-	chanMes, chanErr := readYaml([]byte(manifest))
+	chanMes, chanErr := asyncReadYaml([]byte(manifest))
 	for {
 		select {
 		case dataBytes, ok := <-chanMes:
@@ -99,7 +75,34 @@ func (g goClient) Clientset() (*kubernetes.Clientset, error) {
 	return g.kubeClient.GetClientSet()
 }
 
-func readYaml(data []byte) (<-chan []byte, <-chan error) {
+func (g goClient) Delete(manifest string) (results []string, err error) {
+	yamls, err := syncReadYaml([]byte(manifest))
+	if err != nil {
+		results = append(results, err.Error())
+		return results, err
+	}
+
+	//delete resource in reverse order
+	for i := len(yamls) - 1; i >= 0; i-- {
+		json, err := yamlToJson.YAMLToJSON(yamls[i])
+		if err != nil {
+			continue
+		}
+		toUnstructured, err := kubeclient.ToUnstructured(json)
+		if err != nil {
+			results = append(results, err.Error())
+			return results, err
+		}
+		err = g.kubeClient.DeleteResourceByKindAndNameAndNamespace(toUnstructured.GetKind(), toUnstructured.GetName(), toUnstructured.GetNamespace(), v1.DeleteOptions{})
+		if err != nil {
+			results = append(results, err.Error())
+			return results, err
+		}
+	}
+	return results, nil
+}
+
+func asyncReadYaml(data []byte) (<-chan []byte, <-chan error) {
 	var (
 		chanErr        = make(chan error)
 		chanBytes      = make(chan []byte)
@@ -125,40 +128,20 @@ func readYaml(data []byte) (<-chan []byte, <-chan error) {
 	return chanBytes, chanErr
 }
 
-// TODO change implementation to native go
-func (g goClient) Delete(manifest string) error {
-	//store manifest as file
-	manifestFile, err := g.getManifestFile(manifest)
-	if err != nil {
-		return err
-	}
-	//call kubectl delete
-	args := []string{fmt.Sprintf("--kubeconfig=%s", g.kubeconfigFile), "delete", "-f", manifestFile}
-	//nolint:gosec //arguments for cmd call not allowed: replace command-call with Go k8s-client
-	_, err = exec.Command(g.kubectlCmd, args...).CombinedOutput()
-	return err
-}
+func syncReadYaml(data []byte) (results [][]byte, err error) {
+	var (
+		multidocReader = utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data)))
+	)
 
-func (g *goClient) getManifestFile(manifest string) (string, error) {
-	if g.manifestFile == "" {
-		g.manifestFile = "/tmp/manifest-" + uuid.New().String()
-		if err := ioutil.WriteFile(g.manifestFile, []byte(manifest), 0600); err != nil {
-			return "", errors.Wrap(err, "failed to store manifests in a file")
+	for {
+		buf, err := multidocReader.Read()
+		if err != nil {
+			if err == io.EOF {
+				return results, nil
+			}
+			return results, err
 		}
+		results = append(results, buf)
 	}
-	return g.manifestFile, nil
-}
-
-func kubectl() (string, error) {
-	//try lookup using which
-	whichLookup, err := exec.Command("which", "kubectl").CombinedOutput()
-	if err == nil {
-		return strings.TrimSpace(string(whichLookup)), nil
-	}
-	//fallback to env-var
-	envLookup, ok := os.LookupEnv(envVarKubectlPath)
-	if !ok {
-		return "", fmt.Errorf("cannot find kubectl cmd, please set env-var '%s'", envVarKubectlPath)
-	}
-	return envLookup, nil
+	return results, err
 }

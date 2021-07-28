@@ -7,7 +7,7 @@ import (
 
 type kubernetesClient interface {
 	Deploy(manifest string) ([]string, []types.Metadata, error)
-	Delete(manifest string) error
+	Delete(manifest string) (results []string, err error)
 	Clientset() (*kubernetes.Clientset, error)
 }
 

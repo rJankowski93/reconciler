@@ -26,7 +26,8 @@ func TestKubernetesClient(t *testing.T) {
 		//cleanup
 		defer func() {
 			t.Log("Cleanup test resources")
-			require.NoError(t, kubeClient.Delete(manifest))
+			_, err := kubeClient.Delete(manifest)
+			require.NoError(t, err)
 		}()
 
 		require.NoError(t, err)
